@@ -2,16 +2,30 @@
   "name": "hacktiba-2025-labs",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
 
-  "postCreateCommand": "python -m pip install --upgrade pip && for req in lab*/requirements.txt; do [ -f \"$req\" ] && pip install -r \"$req\"; done",
+  // Comandos executados logo após a criação do container
+  "postCreateCommand": "python -m pip install --upgrade pip && for req in lab*/requirements.txt; do [ -f \"$req\" ] && echo \"📦 Instalando $req\" && pip install -r \"$req\"; done",
 
-  "postStartCommand": "python - <<'PY'\nfrom importlib import import_module\nfor m in (\"torch\",\"transformers\"): \n  try:\n    mod = import_module(m)\n    print(f\"✅ {m}\", getattr(mod, \"__version__\", \"n/a\"))\n  except:\n    print(f\"ℹ️ {m} não instalado\")\nPY",
+  // Comando que roda sempre que o container é iniciado
+  "postStartCommand": "python - <<'PY'\nfrom importlib import import_module\nfor m in (\"torch\",\"transformers\"):\n  try:\n    mod = import_module(m)\n    print(f\"✅ {m}\", getattr(mod, \"__version__\", \"n/a\"))\n  except Exception:\n    print(f\"ℹ️ {m} não instalado\")\nPY",
 
+  // Customizações no VS Code
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",
         "ms-toolsai.jupyter"
-      ]
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.analysis.typeCheckingMode": "basic",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
     }
+  },
+
+  // Variáveis de ambiente no container
+  "containerEnv": {
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "PYTHONUNBUFFERED": "1"
   }
 }
