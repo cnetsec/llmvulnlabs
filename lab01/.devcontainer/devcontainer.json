@@ -1,12 +1,11 @@
 {
   "name": "hacktiba-2025-lab01",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "postCreateCommand": "python -m pip install --upgrade pip && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch && python -m pip install transformers && python -c \"import torch, transformers; print('✅ Torch', torch.__version__, '| Transformers', transformers.__version__)\"",
+  "postCreateCommand": "/bin/bash -lc \"python -m pip install --upgrade pip && python -m pip install -q --index-url https://download.pytorch.org/whl/cpu torch && python -m pip install -q transformers\"",
+  "postStartCommand": "/bin/bash -lc \"python - <<'PY'\ntry:\n  import torch, transformers\n  print('✅ Torch OK:', torch.__version__, '| Transformers OK:', transformers.__version__)\nexcept Exception as e:\n  print('⚠️ Dependências ausentes, instalando...')\n  import subprocess\n  subprocess.check_call(['python','-m','pip','install','--index-url','https://download.pytorch.org/whl/cpu','torch'])\n  subprocess.check_call(['python','-m','pip','install','transformers'])\n  import torch, transformers\n  print('✅ Reinstalado: Torch', torch.__version__, '| Transformers', transformers.__version__)\nPY\"",
   "customizations": {
     "vscode": {
-      "extensions": [
-        "ms-python.python"
-      ]
+      "extensions": ["ms-python.python"]
     }
   }
 }
