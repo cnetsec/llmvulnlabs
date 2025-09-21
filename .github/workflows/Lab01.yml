@@ -7,20 +7,17 @@ on:
         description: "Perguntas (JSON array ou separadas por ||)"
         required: true
         type: string
-      python:
-        description: "Versão do Python"
-        required: true
-        type: choice
-        options: ["3.10", "3.11", "3.12"]
 
 jobs:
   lab01:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python }}
+          python-version: "3.11"
+
       - name: "▶️ Executar Lab01.py"
         env:
           LAB01_PERGUNTAS: ${{ inputs.perguntas }}
