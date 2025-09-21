@@ -1,0 +1,34 @@
+{
+  // Nome exibido no Codespaces/VS Code
+  "name": "hacktiba-2025-labs",
+
+  // Imagem base oficial da Microsoft (Python 3.11 já pronto)
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+
+  // Comando executado logo após o Codespace ser criado ou rebuildado
+  "postCreateCommand": "/bin/bash -lc '\
+    set -e; \
+    echo \"📦 Atualizando pip...\"; \
+    python -m pip install --upgrade pip; \
+    \
+    echo \"📂 Instalando dependências de todos os labs com requirements.txt...\"; \
+    for req in lab*/requirements.txt; do \
+      if [ -f \"$req\" ]; then \
+        echo \"➡️  Instalando $req\"; \
+        pip install -r \"$req\" || echo \"⚠️ Falhou em $req (continuando)\"; \
+      fi; \
+    done; \
+    \
+    echo \"✅ Ambiente pronto.\" \
+  '",
+
+  // Customizações de editor (extensões no VS Code dentro do Codespace)
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",     // Suporte a Python
+        "ms-python.vscode-pylance" // IntelliSense e autocomplete
+      ]
+    }
+  }
+}
