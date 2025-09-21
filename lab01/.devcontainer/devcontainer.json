@@ -1,10 +1,12 @@
 {
   "name": "hacktiba-2025-lab01",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "postCreateCommand": "pip install --upgrade pip && pip install -q --index-url https://download.pytorch.org/whl/cpu torch && pip install -q transformers",
+  "postCreateCommand": "python -m pip install --upgrade pip && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch && python -m pip install transformers && python -c \"import torch, transformers; print('✅ Torch', torch.__version__, '| Transformers', transformers.__version__)\"",
   "customizations": {
     "vscode": {
-      "extensions": ["ms-python.python"]
+      "extensions": [
+        "ms-python.python"
+      ]
     }
   }
 }
