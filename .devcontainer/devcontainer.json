@@ -1,69 +1,17 @@
 {
-  // Nome exibido no Codespaces/VS Code
   "name": "hacktiba-2025-labs",
-
-  // Imagem oficial com Python 3.11 (já vem com pip)
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
 
-  // (Opcional) Reafirma Python 3.11 via Feature oficial
-  "features": {
-    "ghcr.io/devcontainers/features/python:1": {
-      "version": "3.11"
-    }
-  },
+  "postCreateCommand": "python -m pip install --upgrade pip && for req in lab*/requirements.txt; do [ -f \"$req\" ] && pip install -r \"$req\"; done",
 
-  // Instala TODOS os requirements encontrados nos labs (lab01/, lab02/, ...)
-  "postCreateCommand": "/bin/bash -lc '\
-    set -e; \
-    echo \"📦 Atualizando pip\"; \
-    python -m pip install --upgrade pip; \
-    echo \"📂 Procurando requirements em lab*/requirements.txt\"; \
-    found=0; \
-    for req in lab*/requirements.txt; do \
-      if [ -f \"$req\" ]; then \
-        found=1; \
-        echo \"➡️  Instalando $req\"; \
-        pip install -r \"$req\" || echo \"⚠️ Falha ao instalar $req (prosseguindo)\"; \
-      fi; \
-    done; \
-    if [ $found -eq 0 ]; then \
-      echo \"ℹ️ Nenhum lab*/requirements.txt encontrado. Pulei instalações.\"; \
-    fi; \
-  '",
+  "postStartCommand": "python - <<'PY'\nfrom importlib import import_module\nfor m in (\"torch\",\"transformers\"): \n  try:\n    mod = import_module(m)\n    print(f\"✅ {m}\", getattr(mod, \"__version__\", \"n/a\"))\n  except:\n    print(f\"ℹ️ {m} não instalado\")\nPY",
 
-  // Checagem leve ao iniciar: mostra versões se torch/transformers estiverem presentes
-  "postStartCommand": "/bin/bash -lc '\
-    python - <<\"PY\" \
-from importlib.util import find_spec as f; \
-import sys; \
-def v(m): \
-  try: \
-    mod=__import__(m); print(f\"✅ {m}\", getattr(mod,\"__version__\",\"n/a\")); \
-  except Exception as e: \
-    print(f\"ℹ️ {m} não instalado\"); \
-for m in (\"torch\",\"transformers\"): v(m) \
-PY \
-  '",
-
-  // Extensões úteis no editor
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance",
         "ms-toolsai.jupyter"
-      ],
-      "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python",
-        "python.analysis.typeCheckingMode": "basic",
-        "terminal.integrated.defaultProfile.linux": "bash"
-      }
+      ]
     }
-  },
-
-  // Qualquer variável extra útil
-  "containerEnv": {
-    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-    "PYTHONUNBUFFERED": "1"
   }
 }
