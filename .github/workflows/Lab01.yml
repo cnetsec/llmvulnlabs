@@ -1,4 +1,4 @@
-name: "🧪 Hacktiba 2025 — Lab01 Local (cache + modelo leve)"
+name: "🧪 Hacktiba 2025 — Lab01 Local"
 
 on:
   workflow_dispatch:
@@ -8,16 +8,29 @@ on:
         required: true
         type: string
       modelo:
-        description: "HuggingFace model id (ex.: sshleifer/tiny-gpt2)"
-        required: false
-        type: string
+        description: "Escolha o modelo Hugging Face"
+        required: true
+        type: choice
+        options:
+          - sshleifer/tiny-gpt2   # super leve (~15MB)
+          - distilgpt2            # médio (~500MB)
+          - gpt2                  # padrão (~500MB)
+      tamanho:
+        description: "Quantidade máxima de tokens da resposta"
+        required: true
+        type: choice
+        options:
+          - "20"
+          - "40"
+          - "80"
 
 jobs:
   lab01:
     runs-on: ubuntu-latest
     env:
       HF_HOME: ~/.cache/huggingface
-      LAB01_MODEL: ${{ inputs.modelo || 'sshleifer/tiny-gpt2' }}
+      LAB01_MODEL: ${{ inputs.modelo }}
+      LAB01_TAMANHO: ${{ inputs.tamanho }}
 
     steps:
       - name: "📥 Checkout"
@@ -48,18 +61,18 @@ jobs:
           restore-keys: |
             hf-${{ runner.os }}-
 
-      - name: "📦 Instalar dependências (transformers + torch CPU)"
+      - name: "📦 Instalar dependências"
         run: |
           python -m pip install --upgrade pip
           pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch
           pip install --quiet transformers
 
-      - name: "🔥 Pré-baixar modelo (warm cache)"
+      - name: "🔥 Pré-baixar modelo"
         run: |
           python - <<'PY'
           import os
           from transformers import pipeline
-          model = os.environ.get("LAB01_MODEL","sshleifer/tiny-gpt2")
+          model = os.environ["LAB01_MODEL"]
           gen = pipeline("text-generation", model=model)
           gen("warmup", max_new_tokens=1)
           print(f"[warm] modelo pronto: {model}")
@@ -69,4 +82,5 @@ jobs:
         env:
           LAB01_PERGUNTAS: ${{ inputs.perguntas }}
           LAB01_MODEL: ${{ env.LAB01_MODEL }}
+          LAB01_TAMANHO: ${{ env.LAB01_TAMANHO }}
         run: python Lab01.py
