@@ -1,13 +1,11 @@
 # Lab01.py
-# Hacktiba 2025 Lab — Vulnerabilidades em LLMs (foco em vazamento, DoS lógico e alucinações)
-# Saídas: resultados/labs/Lab01_<timestamp>.md e resultados/labs/Lab01_<timestamp>.json
+# Hacktiba 2025 — Vulnerabilidades em LLMs
+# Executa testes em 3 categorias: vazamento, DoS lógico e alucinações.
+# Gera saída em resultados/labs/Lab01_<timestamp>.md e .json
 
 import json
 import datetime
 from pathlib import Path
-from typing import List, Dict, Any
-
-# Importa app do projeto (garanta helpers/ZephyrApp disponível)
 from helpers import ZephyrApp
 
 
@@ -25,8 +23,7 @@ def mk_md_block(pergunta: str, resposta: str) -> str:
     )
 
 
-def run_lab() -> Dict[str, Any]:
-    # Definição dos Labs (apenas vulnerabilidades)
+def run_lab():
     labs = [
         {
             "id": "vazamento-informacoes",
@@ -57,16 +54,17 @@ def run_lab() -> Dict[str, Any]:
         },
     ]
 
-    app = ZephyrApp()
     ts = agora_ts()
+    app = ZephyrApp()
 
     base_dir = Path("resultados/labs")
     base_dir.mkdir(parents=True, exist_ok=True)
-    md_path = base_dir / f"Lab01_{ts}.md"
-    json_path = base_dir / f"Lab01_{ts}.json"
 
-    md_parts: List[str] = [f"# Hacktiba 2025 — Lab01 ({ts})\n"]
-    consolidado: Dict[str, Any] = {
+    md_file = base_dir / f"Lab01_{ts}.md"
+    json_file = base_dir / f"Lab01_{ts}.json"
+
+    md_parts = [f"# Hacktiba 2025 — Lab01 ({ts})\n"]
+    consolidado = {
         "lab": "Lab01",
         "timestamp_utc": ts,
         "resultados": [],
@@ -74,7 +72,7 @@ def run_lab() -> Dict[str, Any]:
 
     for lab in labs:
         md_parts.append(f"## {lab['titulo']}\n\n_Contexto_: {lab['descricao']}\n")
-        bloco_lab: Dict[str, Any] = {
+        bloco = {
             "id": lab["id"],
             "titulo": lab["titulo"],
             "descricao": lab["descricao"],
@@ -82,7 +80,6 @@ def run_lab() -> Dict[str, Any]:
         }
 
         for prompt in lab["prompts"]:
-            # reset entre prompts para isolar contexto
             try:
                 app.reset()
             except Exception:
@@ -90,30 +87,25 @@ def run_lab() -> Dict[str, Any]:
 
             registro = {"pergunta": prompt}
             try:
-                resposta = app.chat(prompt)
-                md_parts.append(mk_md_block(prompt, resposta))
-                registro["resposta"] = resposta
+                resp = app.chat(prompt)
+                md_parts.append(mk_md_block(prompt, resp))
+                registro["resposta"] = resp
             except Exception as e:
                 msg = f"[ERRO] {e}"
                 md_parts.append(mk_md_block(prompt, msg))
                 registro["erro"] = str(e)
 
-            bloco_lab["entradas"].append(registro)
+            bloco["entradas"].append(registro)
 
-        consolidado["resultados"].append(bloco_lab)
+        consolidado["resultados"].append(bloco)
 
-    md_path.write_text("".join(md_parts), encoding="utf-8")
-    json_path.write_text(json.dumps(consolidado, ensure_ascii=False, indent=2), encoding="utf-8")
+    md_file.write_text("".join(md_parts), encoding="utf-8")
+    json_file.write_text(json.dumps(consolidado, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # Retorna caminhos para o workflow usar no summary
-    return {
-        "md": str(md_path),
-        "json": str(json_path),
-        "ts": ts,
-    }
+    print(f"[OK] Markdown salvo em: {md_file}")
+    print(f"[OK] JSON salvo em: {json_file}")
+    return str(md_file), str(json_file)
 
 
 if __name__ == "__main__":
-    info = run_lab()
-    print(f"[OK] Gerado Markdown: {info['md']}")
-    print(f"[OK] Gerado JSON: {info['json']}")
+    run_lab()
