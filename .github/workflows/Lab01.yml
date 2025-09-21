@@ -3,38 +3,25 @@ name: "🧪 Hacktiba 2025 — Lab01"
 on:
   workflow_dispatch:
     inputs:
-      python:
-        description: "🐍 Versão do Python"
+      perguntas:
+        description: "Perguntas (JSON array ou separadas por ||)"
         required: true
-        default: "3.11"
+        type: string
+      python:
+        description: "Versão do Python"
+        required: true
         type: choice
-        options: ["3.10","3.11","3.12"]
-
-permissions:
-  contents: read
+        options: ["3.10", "3.11", "3.12"]
 
 jobs:
   lab01:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - name: "📥 Checkout"
-        uses: actions/checkout@v4
-
-      - name: "🐍 Setup Python"
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python }}
-
       - name: "▶️ Executar Lab01.py"
-        run: |
-          python Lab01.py
-
-      - name: "📤 Artefatos"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Hacktiba2025-Lab01
-          path: |
-            resultados/labs/Lab01_*.md
-            resultados/labs/Lab01_*.json
-          if-no-files-found: error
+        env:
+          LAB01_PERGUNTAS: ${{ inputs.perguntas }}
+        run: python Lab01.py
