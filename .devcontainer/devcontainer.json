@@ -2,33 +2,68 @@
   // Nome exibido no Codespaces/VS Code
   "name": "hacktiba-2025-labs",
 
-  // Imagem base oficial da Microsoft (Python 3.11 já pronto)
+  // Imagem oficial com Python 3.11 (já vem com pip)
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
 
-  // Comando executado logo após o Codespace ser criado ou rebuildado
+  // (Opcional) Reafirma Python 3.11 via Feature oficial
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.11"
+    }
+  },
+
+  // Instala TODOS os requirements encontrados nos labs (lab01/, lab02/, ...)
   "postCreateCommand": "/bin/bash -lc '\
     set -e; \
-    echo \"📦 Atualizando pip...\"; \
+    echo \"📦 Atualizando pip\"; \
     python -m pip install --upgrade pip; \
-    \
-    echo \"📂 Instalando dependências de todos os labs com requirements.txt...\"; \
+    echo \"📂 Procurando requirements em lab*/requirements.txt\"; \
+    found=0; \
     for req in lab*/requirements.txt; do \
       if [ -f \"$req\" ]; then \
+        found=1; \
         echo \"➡️  Instalando $req\"; \
-        pip install -r \"$req\" || echo \"⚠️ Falhou em $req (continuando)\"; \
+        pip install -r \"$req\" || echo \"⚠️ Falha ao instalar $req (prosseguindo)\"; \
       fi; \
     done; \
-    \
-    echo \"✅ Ambiente pronto.\" \
+    if [ $found -eq 0 ]; then \
+      echo \"ℹ️ Nenhum lab*/requirements.txt encontrado. Pulei instalações.\"; \
+    fi; \
   '",
 
-  // Customizações de editor (extensões no VS Code dentro do Codespace)
+  // Checagem leve ao iniciar: mostra versões se torch/transformers estiverem presentes
+  "postStartCommand": "/bin/bash -lc '\
+    python - <<\"PY\" \
+from importlib.util import find_spec as f; \
+import sys; \
+def v(m): \
+  try: \
+    mod=__import__(m); print(f\"✅ {m}\", getattr(mod,\"__version__\",\"n/a\")); \
+  except Exception as e: \
+    print(f\"ℹ️ {m} não instalado\"); \
+for m in (\"torch\",\"transformers\"): v(m) \
+PY \
+  '",
+
+  // Extensões úteis no editor
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-python.python",     // Suporte a Python
-        "ms-python.vscode-pylance" // IntelliSense e autocomplete
-      ]
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.analysis.typeCheckingMode": "basic",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
     }
+  },
+
+  // Qualquer variável extra útil
+  "containerEnv": {
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "PYTHONUNBUFFERED": "1"
   }
 }
