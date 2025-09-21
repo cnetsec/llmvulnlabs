@@ -1,4 +1,4 @@
-name: 🧪 Hacktiba 2025 — Lab01 (Vulnerabilidades em LLMs)
+name: "🧪 Hacktiba 2025 — Lab01 (Vulnerabilidades em LLMs)"
 
 on:
   workflow_dispatch:
@@ -37,4 +37,45 @@ concurrency:
 jobs:
   lab01:
     runs-on: ubuntu-latest
-    timeout-minutes:
+    timeout-minutes: 60
+
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+
+      - name: "🐍 Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python }}
+          cache: "pip"
+
+      - name: "📦 Instalar dependências do projeto"
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: "➕ Garantir libs para notebooks (se forem executados)"
+        if: ${{ inputs.executar_notebooks == 'true' }}
+        run: |
+          pip install papermill nbconvert nbformat
+
+      - name: "▶️ Rodar Lab01.py (tudo centralizado no Python)"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          LAB_FAIL_ON_ERROR: ${{ inputs.falhar_em_erro }}
+          LAB_RUN_NOTEBOOKS: ${{ inputs.executar_notebooks }}
+          LAB_NOTEBOOK_GLOB: ${{ inputs.padrao_notebooks }}
+        run: |
+          python Lab01.py
+
+      - name: "📤 Publicar artefatos"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hacktiba2025-Lab01
+          path: |
+            resultados/labs/Lab01_*.md
+            resultados/labs/Lab01_*.json
+            execucoes/*.ipynb
+            execucoes/*.html
+          if-no-files-found: warn
