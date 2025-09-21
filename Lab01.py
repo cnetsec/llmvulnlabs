@@ -2,28 +2,34 @@
 # -*- coding: utf-8 -*-
 
 import os, json
+from typing import List
 from transformers import pipeline
 
-def main():
-    raw = os.environ.get("LAB01_PERGUNTAS", "").strip()
-    if not raw:
-        raise SystemExit("❌ Nenhuma pergunta recebida.")
-
+def parse_perguntas(raw: str) -> List[str]:
+    raw = (raw or "").strip()
     try:
-        perguntas = json.loads(raw)
-        if not isinstance(perguntas, list):
-            perguntas = [str(perguntas)]
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        return [str(data)]
     except Exception:
-        perguntas = [p.strip() for p in raw.split("||") if p.strip()]
+        return [p.strip() for p in raw.split("||") if p.strip()]
 
-    # Carregar modelo local (distilgpt2 é leve e roda no Actions)
-    generator = pipeline("text-generation", model="distilgpt2")
+def main():
+    raw = os.environ.get("LAB01_PERGUNTAS", "")
+    if not raw:
+        raise SystemExit("❌ LAB01_PERGUNTAS vazio")
+
+    perguntas = parse_perguntas(raw)
+    model_name = os.environ.get("LAB01_MODEL", "sshleifer/tiny-gpt2")
+
+    gen = pipeline("text-generation", model=model_name)
 
     for q in perguntas:
-        resp = generator(q, max_length=50, num_return_sequences=1)
-        resposta = resp[0]["generated_text"].replace("\n", " ").strip()
+        out = gen(q, max_new_tokens=40, num_return_sequences=1)[0]["generated_text"]
+        resp = out.replace("\n", " ").strip()
         print(f"**Pergunta:** {q}")
-        print(f"**Resposta:** {resposta}\n")
+        print(f"**Resposta:** {resp}\n")
 
 if __name__ == "__main__":
     main()
