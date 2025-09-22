@@ -1,3 +1,4 @@
+curl -fsSL https://ollama.com/install.sh | sh
 ollama serve &
 # puxe pelo menos um deles:
 ollama pull llama3.2:1b || true
