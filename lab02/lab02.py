@@ -1,181 +1,290 @@
-import os, json, time, urllib.request, urllib.error
-import gradio as gr
+# lab02.py — LLM Vuln Labs Assistant (leve, defensivo, com fallback e anti-oversafety)
+import os, json, time, subprocess, urllib.request, urllib.error
+from typing import Tuple, List
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, PlainTextResponse
 import ollama
 
-# -------- Config --------
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("LAB02_MODEL", "llama3.2:3b-instruct")  # leve p/ CPU
-LAB02_AUTO_PULL = os.environ.get("LAB02_AUTO_PULL", "true").lower() in {"1","true","yes"}
-PORT = int(os.environ.get("LAB02_PORT", "7860"))
+# ======================= CONFIG (otimizado p/ pouca RAM) =======================
+OLLAMA_HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+# Prioridade: 1) llama3.2:1b  ->  2) tinyllama:1.1b
+OLLAMA_MODEL = os.environ.get("LAB02_MODEL", "llama3.2:1b")
+AUTO_PULL    = os.environ.get("LAB02_AUTO_PULL", "true").lower() in {"1","true","yes"}
+HOST         = os.environ.get("LAB02_HOST", "0.0.0.0")
+PORT         = int(os.environ.get("LAB02_PORT", "7860"))
+PULL_TIMEOUT = int(os.environ.get("LAB02_PULL_TIMEOUT", "900"))   # 15 min
+NUM_CTX      = int(os.environ.get("LAB02_NUM_CTX", "128"))        # contexto baixo = menos RAM
+
+# Fallbacks focados em leveza
+ALT_TAGS = {
+    "llama3.2:1b": ["tinyllama:1.1b"],
+    "llama3.2:3b": ["llama3.2:1b", "tinyllama:1.1b"],
+    "llama3.2:3b-instruct": ["llama3.2:1b", "tinyllama:1.1b"],
+    "qwen2.5:1.5b-instruct": ["llama3.2:1b", "tinyllama:1.1b"],
+}
+SMALL_CANDIDATES = ["llama3.2:1b", "tinyllama:1.1b"]
 
 client = ollama.Client(host=OLLAMA_HOST)
 
-# -------- Utils HTTP --------
-def _http_json(method: str, path: str, payload: dict | None = None, timeout: float = 15.0):
+# ==================== OLLAMA HELPERS ===================
+def _http_json(method: str, path: str, payload: dict | None = None, timeout: float = 12.0):
     url = OLLAMA_HOST.rstrip("/") + path
-    data = None
-    headers = {"Content-Type": "application/json"}
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def ollama_alive():
+def is_server_alive() -> Tuple[bool, str]:
     try:
-        _http_json("GET", "/api/tags", timeout=3.0)
+        _http_json("GET", "/api/tags", timeout=4.0)
         return True, "OK"
     except Exception as e:
-        return False, f"{e}"
+        return False, str(e)
 
-def model_installed(model: str) -> bool:
+def list_installed_models() -> List[str]:
     try:
         tags = _http_json("GET", "/api/tags")
-        for m in tags.get("models", []):
-            if m.get("name") == model:
-                return True
-        return False
+        return [m.get("name") for m in tags.get("models", []) if m.get("name")]
     except Exception:
-        return False
+        return []
 
-def pull_model_blocking(model: str, max_wait_sec: int = 900, poll_every: float = 3.0) -> str:
-    """
-    Puxa o modelo sem streaming e aguarda até aparecer em /api/tags.
-    """
+def is_model_installed(model: str) -> bool:
+    return model in set(list_installed_models())
+
+def resolve_model(model_name: str) -> str:
+    if is_model_installed(model_name):
+        return model_name
+    for alt in ALT_TAGS.get(model_name, []):
+        if is_model_installed(alt):
+            return alt
+    return model_name
+
+def pull_model_blocking(model: str, timeout_sec: int = PULL_TIMEOUT) -> Tuple[bool, str]:
     try:
-        _http_json("POST", "/api/pull", {"model": model, "stream": False}, timeout=120.0)
-    except urllib.error.HTTPError as he:
-        return f"❌ HTTPError no pull: {he.code} {he.reason}"
+        proc = subprocess.run(
+            ["ollama", "pull", model],
+            capture_output=True, text=True, timeout=timeout_sec, check=False,
+        )
+        if proc.returncode == 0:
+            for _ in range(10):
+                if is_model_installed(model):
+                    return True, f"✅ Modelo '{model}' instalado."
+                time.sleep(1.0)
+            return True, f"⚠️ Pull OK, mas ainda não vi '{model}' em /api/tags."
+        return False, f"❌ Falha no pull ({proc.returncode}): {proc.stderr or proc.stdout}"
+    except subprocess.TimeoutExpired:
+        return False, f"⏳ Timeout ao puxar '{model}' (>{timeout_sec}s)."
+    except FileNotFoundError:
+        return False, "❌ 'ollama' CLI não encontrado no PATH. Instale e rode `ollama serve`."
     except Exception as e:
-        return f"❌ Erro ao iniciar pull: {e}"
+        return False, f"❌ Erro ao puxar modelo: {e}"
 
-    start = time.time()
-    while time.time() - start < max_wait_sec:
-        if model_installed(model):
-            return "✅ Modelo instalado."
-        time.sleep(poll_every)
-    return f"⏳ Timeout: modelo '{model}' não apareceu após {max_wait_sec}s."
+# =================== CONTEXTO: LLM VULN LABS (Educação/Defesa) ==================
+LLM_VULN_LABS_CONTEXT = """
+# LLM Vuln Labs — Repositório Didático de Vulnerabilidades em LLMs
 
-# -------- Contexto Hacktiba --------
-HACKTIBA_CONTEXT = """
-# Hacktiba 2025 — Evento de Segurança da Informação
+## Objetivo
+Ajudar equipes e estudantes a entender, demonstrar e MITIGAR classes comuns de vulnerabilidades em aplicações com Modelos de Linguagem (LLMs), sempre de forma ética e responsável.
 
-## Propósito
-Missão: Fortalecer o ecossistema de cibersegurança por meio da pesquisa, aprendizado contínuo e compartilhamento.
-Valores:
-- Research: curiosidade, investigação e descoberta.
-- Learn: aprendizado técnico com propósito.
-- Share: compartilhamento de conhecimento com impacto real.
+## Escopo (alto nível, foco defensivo)
+- Prompt Injection (direta e indireta / RAG) e Tool/Function Injection.
+- Jailbreaks e bypass de políticas.
+- Prompt/Secret Leaking e exfiltração de dados sensíveis.
+- Training Data Extraction (consulta a memorizações indevidas).
+- Insecure Output Handling (execução cega de comandos/URLs).
+- Indução a fraude/engenharia social por LLMs.
+- Avaliação de risco, testes e hardening de pipelines (RAG, agentes, ferramentas).
 
-## Detalhes
-- Nome: Hacktiba 2025
-- Data: 11 de outubro de 2025
-- Horário: 09:00 – 12:00
-- Local: R. Dr. Alcides Vieira Arcoverde, 1225 – Curitiba/PR
-- Formato: palestras curtas, painéis, demonstrações, labs leves, networking
-- Público-alvo: desenvolvedores, analistas, estudantes e pesquisadores
-- Slogan: “Do CVE à Correção”
+## O que o repositório cobre
+- Cenários de laboratório seguros para estudo e validação.
+- Exemplos de payloads *red-team style* em nível educacional (não operacional).
+- Checklists de mitigação e padrões de arquitetura segura.
+- Testes automatizados (harness) e métricas de robustez.
 
-## Agenda
-08:30 — Boas-vindas e credenciamento
-09:00 – 09:20 — Danilo Costa: “Do CVE à Correção: A Jornada de uma Vulnerabilidade em um Software de IA”
-09:20 – 10:00 — Wagner Elias: Painel AppSec — Perguntas e Respostas
-10:05 – 10:35 — Julio: Gestão de Riscos de Terceiros (ISO 27001, NIST, LGPD)
-10:40 – 11:10 — Izael GrPereira: DevSecOps — O básico bem-feito é melhor que perfeito (OWASP Top 10, pipelines open source)
-11:15 – 11:45 — Luigi Polidorio: Q-Day — O dia em que a segurança digital vai quebrar (computação quântica)
+## Princípios
+- Ensino responsável, sem instruções operacionais para dano real.
+- Foco em prevenção, detecção e resposta.
+- Privacidade: não usar dados reais/sensíveis nos testes.
+- Conformidade: aderir a políticas de segurança e leis aplicáveis.
 
-## Avisos
-O evento poderá ser adiado ou cancelado em razão de força maior.
-Não há responsabilidade da organização por despesas adicionais de transporte, hospedagem ou alimentação.
-
-## Chamado
-Traga sua pesquisa, mostre sua demo e aprenda com a comunidade Hacktiba.
+## Mitigações (resumo)
+- Entrada: normalização, sanitação, filtragem contextual, anotação do user-intent.
+- Política: prompts com políticas claras, role separations, *partial serialization* (evitar segredos no prompt).
+- Pipeline: RAG com *content safety* no corpus, *link hygiene*, *guardrails* e *output moderation*.
+- Execução: *least-privilege*, *sandboxing* e *allowlists* para ferramentas externas.
+- Observabilidade: *audit logs*, *attack traces*, *canaries* e avaliações contínuas.
 """
 
+# ======== PROMPT ANTI-OVER-SAFETY (defensivo, não recusar à toa) ========
 PROMPT_GUIDE = f"""
-Você é o assistente oficial do Hacktiba 2025.
-Use SEMPRE o contexto abaixo para responder. Seja claro, completo e organizado, em português.
-Se a pergunta não for sobre o evento, responda brevemente e retorne ao contexto do Hacktiba.
+Você é o **assistente oficial do LLM Vuln Labs** (educacional/defensivo).
+Regras:
+1) Trate SEMPRE 'LLM Vuln Labs' como um repositório didático de segurança em LLMs (ético).
+2) NÃO recuse perguntas inofensivas sobre o laboratório. Recuse apenas pedidos claramente maliciosos ou que solicitem passo-a-passo operacional para causar dano.
+3) Responda EM PORTUGUÊS, de forma clara e fiel AO CONTEXTO fornecido. Se algo não estiver no contexto, diga "não tenho essa informação no contexto".
+4) Foque em conceitos, riscos, detecção e MITIGAÇÕES. Nada de instruções operacionais para invasão real.
+5) Quando fizer sentido, estruture em: **Resumo • Riscos • Exemplos de teste (alto nível) • Mitigações • Próximos passos**.
 
-{HACKTIBA_CONTEXT}
-
-Agora responda à pergunta do usuário:
+Contexto oficial:
+{LLM_VULN_LABS_CONTEXT}
 """
 
-# -------- Ações UI --------
-def do_health():
-    alive, why = ollama_alive()
+# Few-shots para orientar o tom
+FEW_SHOTS = [
+    {"role": "user", "content": "O que é o LLM Vuln Labs?"},
+    {"role": "assistant", "content": "É um repositório didático para estudar vulnerabilidades em LLMs com foco defensivo: entender riscos (prompt injection, jailbreaks, leaking), testar em laboratório e aplicar MITIGAÇÕES seguras."},
+    {"role": "user", "content": "Me dá um passo a passo para vazar segredos de produção via LLM."},
+    {"role": "assistant", "content": "Não forneço instruções operacionais para causar dano. Posso explicar os riscos de prompt/secret leaking em ALTO NÍVEL e listar MITIGAÇÕES como remover segredos do prompt, filtrar saídas e usar sandboxes."},
+    {"role": "user", "content": "Como mitigar prompt injection em um RAG?"},
+    {"role": "assistant", "content": "Resumo: isole papéis, sanitize entradas, aplique content safety no corpus, use políticas no prompt e moderação de saída, limite permissões de ferramentas e adote observabilidade. Teste continuamente com um harness de ataques."},
+]
+
+# ======================= FASTAPI UI =====================
+app = FastAPI()
+
+HTML = """<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM Vuln Labs — Assistente</title>
+<script src="https://unpkg.com/htmx.org@2.0.3"></script>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#0b1020;color:#fff;margin:0}
+.wrap{max-width:900px;margin:40px auto;padding:0 16px}
+.card{background:#111935;border:1px solid #1e2a55;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.25);padding:20px}
+h1{margin:0 0 6px;font-size:24px}.muted{color:#a9b3d6}.row{display:flex;gap:8px;margin-top:12px}
+input,button{font:inherit;border-radius:12px;border:1px solid #2b3b77;background:#0d142b;color:#fff}
+input{width:100%;padding:12px}button{padding:12px 16px;cursor:pointer}
+button.primary{background:#3c6df0;border-color:#3c6df0}
+pre{white-space:pre-wrap;word-wrap:break-word}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#1b254d;color:#c8d3ff;font-size:12px;margin-left:8px}
+.small{font-size:13px}
+</style>
+<div class="wrap">
+  <div class="card">
+    <h1>LLM Vuln Labs — Assistente <span id="status" class="badge">checando…</span></h1>
+    <div id="hostinfo" class="muted small"></div>
+    <div class="row">
+      <button class="primary" hx-get="/health" hx-target="#status" hx-swap="innerHTML">🔎 Health-check</button>
+      <button hx-post="/pull" hx-target="#answer" hx-swap="innerHTML">⬇️ Baixar modelo agora</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <form hx-post="/chat" hx-target="#answer" hx-swap="innerHTML">
+      <label>Pergunta sobre LLM Vuln Labs / LLM vulnerabilities</label>
+      <input type="text" name="q" placeholder="Ex.: O que é prompt injection? Como mitigar?" required>
+      <div class="row"><button class="primary" type="submit">Enviar</button></div>
+    </form>
+    <div id="answer" style="margin-top:16px"><pre class="muted">Digite sua pergunta acima…</pre></div>
+  </div>
+</div>
+<script>
+fetch('/health').then(r=>r.text()).then(t=>{document.getElementById('status').innerHTML=t});
+fetch('/hostinfo').then(r=>r.text()).then(t=>{document.getElementById('hostinfo').innerHTML=t});
+</script>"""
+
+@app.get("/", response_class=HTMLResponse)
+async def index(): 
+    return HTML
+
+@app.get("/hostinfo", response_class=PlainTextResponse)
+async def hostinfo():
+    eff = resolve_model(OLLAMA_MODEL)
+    return f"Host: {OLLAMA_HOST} • Modelo configurado: {OLLAMA_MODEL} • Efetivo: {eff} • Auto-pull: {'ativado' if AUTO_PULL else 'desativado'} • num_ctx={NUM_CTX}"
+
+@app.get("/health", response_class=PlainTextResponse)
+async def health():
+    alive, why = is_server_alive()
     if not alive:
-        return (f"**Host:** `{OLLAMA_HOST}` • ❌ Ollama indisponível ({why})",)
-    msg = f"**Host:** `{OLLAMA_HOST}` • ✅ Ollama OK  "
-    msg += f"• **Modelo:** `{OLLAMA_MODEL}` "
-    msg += "(instalado ✅)" if model_installed(OLLAMA_MODEL) else "(não instalado ❌)"
-    return (msg,)
+        return f"❌ Ollama indisponível ({why})"
+    eff = resolve_model(OLLAMA_MODEL)
+    flag = "instalado ✅" if is_model_installed(eff) else "não instalado ❌"
+    return f"✅ Ollama OK • {eff}: {flag} • num_ctx={NUM_CTX}"
 
-def do_pull():
-    alive, why = ollama_alive()
-    if not alive:
-        return f"❌ Ollama indisponível ({why}). Inicie com `ollama serve`."
-    status = pull_model_blocking(OLLAMA_MODEL)
-    # retorna status + estado final
-    final = "✅" if model_installed(OLLAMA_MODEL) else "❌"
-    return f"{status}\nEstado final: {final} • Modelo: {OLLAMA_MODEL}"
-
-# -------- Chat --------
-def responder(pergunta: str) -> str:
-    pergunta = (pergunta or "").strip()
-    if not pergunta:
-        return "Digite uma pergunta sobre o Hacktiba."
-
-    alive, why = ollama_alive()
-    if not alive:
-        return f"❌ Ollama indisponível em {OLLAMA_HOST}. Detalhe: {why}"
-
-    if not model_installed(OLLAMA_MODEL):
-        if LAB02_AUTO_PULL:
-            pull_status = pull_model_blocking(OLLAMA_MODEL)
-            if not model_installed(OLLAMA_MODEL):
-                return (f"{pull_status}\n\nAinda não encontrei o modelo '{OLLAMA_MODEL}'. "
-                        f"Tente manualmente: `ollama pull {OLLAMA_MODEL}`.")
-        else:
-            return (f"⚠️ Modelo '{OLLAMA_MODEL}' não encontrado.\n"
-                    f"Instale com: `ollama pull {OLLAMA_MODEL}` ou ajuste LAB02_MODEL.")
-
+def try_chat(model_name: str, prompt: str) -> Tuple[bool, str]:
+    """Contexto + few-shots, foco defensivo/educacional (sem passo-a-passo ofensivo)."""
+    user_prompt = (
+        "O usuário pergunta sobre LLM vulnerabilities. "
+        "Responda SOMENTE com informações do contexto dado, em alto nível e com MITIGAÇÕES; "
+        "evite instruções operacionais para dano real.\n\nPergunta: "
+        + prompt
+    )
+    msgs = [{"role":"system","content":PROMPT_GUIDE}] + FEW_SHOTS + [
+        {"role":"user","content":user_prompt}
+    ]
     try:
         r = client.chat(
-            model=OLLAMA_MODEL,
-            messages=[
-                {"role": "system", "content": PROMPT_GUIDE},
-                {"role": "user", "content": pergunta}
-            ],
-            options={"temperature": 0.2}
+            model=model_name,
+            messages=msgs,
+            options={"temperature": 0.2, "num_ctx": NUM_CTX}
         )
-        return r["message"]["content"]
+        return True, r["message"]["content"]
     except Exception as e:
-        if "not found" in str(e).lower():
-            return (f"⚠️ Modelo '{OLLAMA_MODEL}' não encontrado pelo servidor.\n"
-                    f"Execute: `ollama pull {OLLAMA_MODEL}` e tente novamente.")
-        return f"⚠️ Erro ao consultar Ollama: {e}"
+        return False, str(e)
 
-# -------- UI --------
-with gr.Blocks() as demo:
-    gr.Markdown("# Hacktiba 2025 — Assistente Oficial (Ollama)")
-    status_md = gr.Markdown(value="Carregando status…")
-    with gr.Row():
-        btn_health = gr.Button("🔎 Health-check")
-        btn_pull = gr.Button("⬇️ Baixar modelo agora")
+def handle_oom_and_fallback(err_msg: str, prompt: str) -> str:
+    lowered = err_msg.lower()
+    if ("more system memory" in lowered) or ("out of memory" in lowered) or ("not enough memory" in lowered):
+        for cand in SMALL_CANDIDATES:
+            if not is_model_installed(cand) and AUTO_PULL:
+                pull_model_blocking(cand)
+            if is_model_installed(cand):
+                ok, out = try_chat(cand, prompt)
+                if ok:
+                    return f"(fallback: {cand}, num_ctx={NUM_CTX})\n\n{out}"
+        return ("⚠️ Memória insuficiente e o fallback automático falhou.\n"
+                "Use `ollama pull tinyllama:1.1b` e/ou `export LAB02_NUM_CTX=128`.")
+    return f"⚠️ Erro ao consultar Ollama: {err_msg}"
 
-    entrada = gr.Textbox(label="Pergunta sobre o Hacktiba", placeholder="Ex.: Qual a missão do evento?")
-    saida = gr.Textbox(label="Resposta", lines=12)
-    btn_enviar = gr.Button("Enviar")
+@app.post("/pull", response_class=PlainTextResponse)
+async def pull():
+    alive, why = is_server_alive()
+    if not alive:
+        return f"❌ Ollama indisponível ({why}). Inicie com `ollama serve`."
+    eff = resolve_model(OLLAMA_MODEL)
+    if not is_model_installed(eff):
+        ok, msg = pull_model_blocking(eff)
+        final = "✅" if is_model_installed(eff) else "❌"
+        return f"{msg}\nEstado final: {final} • Modelo: {eff}"
+    return f"✅ Modelo já instalado: {eff}"
 
-    # ações
-    btn_enviar.click(responder, inputs=entrada, outputs=saida)
-    btn_health.click(do_health, inputs=None, outputs=status_md)
-    btn_pull.click(do_pull, inputs=None, outputs=saida)
+@app.post("/chat", response_class=HTMLResponse)
+async def chat(q: str = Form(...)):
+    q = (q or "").strip()
+    if not q:
+        return "<pre>Digite uma pergunta.</pre>"
 
-    # faz um health inicial
-    init = do_health()[0]
-    status_md.value = init
+    alive, why = is_server_alive()
+    if not alive:
+        return f"<pre>❌ Ollama indisponível em {OLLAMA_HOST}. Detalhe: {why}</pre>"
 
-demo.launch(server_name="0.0.0.0", server_port=PORT)
+    eff = resolve_model(OLLAMA_MODEL)
+    if not is_model_installed(eff):
+        if AUTO_PULL:
+            pull_model_blocking(eff)
+            if not is_model_installed(eff):
+                return f"<pre>Não encontrei '{eff}'. Rode `ollama pull {eff}`.</pre>"
+        else:
+            return f"<pre>⚠️ Modelo '{eff}' não encontrado. Rode `ollama pull {eff}`.</pre>"
+
+    ok, out = try_chat(eff, q)
+    if ok:
+        return f"<pre>{out}</pre>"
+    else:
+        return f"<pre>{handle_oom_and_fallback(out, q)}</pre>"
+
+# ===================== STARTUP HOOK =====================
+def startup_prepare():
+    alive, why = is_server_alive()
+    if not alive:
+        print(f"⚠️ Ollama offline ({why}). Inicie em outro terminal: `ollama serve`.")
+        return
+    eff = resolve_model(OLLAMA_MODEL)
+    if not is_model_installed(eff) and AUTO_PULL:
+        ok, msg = pull_model_blocking(eff)
+        print(msg)
+
+startup_prepare()
+
+# ======================= MAIN ==========================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("lab02:app", host=HOST, port=PORT, reload=False)
