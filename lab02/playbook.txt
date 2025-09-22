@@ -1,0 +1,12 @@
+ollama serve &
+# puxe pelo menos um deles:
+ollama pull llama3.2:1b || true
+ollama pull tinyllama:1.1b
+
+export OLLAMA_HOST="http://127.0.0.1:11434"
+export LAB02_MODEL="llama3.2:1b"   # o código cai p/ tinyllama:1.1b se precisar
+export LAB02_NUM_CTX="128"
+export LAB02_AUTO_PULL="true"
+
+python lab02.py
+# abra http://127.0.0.1:7860
