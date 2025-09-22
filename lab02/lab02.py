@@ -129,4 +129,6 @@ with gr.Blocks() as demo:
     )
     entrada = gr.Textbox(label="Pergunta", placeholder="Ex.: Quero automatizar build e testes…")
     saida = gr.Textbox(label="Resposta")
-    gr.Button("Enviar").click(responder, inputs
+    gr.Button("Enviar").click(responder, inputs=entrada, outputs=saida)
+
+demo.launch(server_name="0.0.0.0", server_port=PORT)
