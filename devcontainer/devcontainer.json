@@ -1,0 +1,25 @@
+{
+  "name": "hacktiba-2025-mobile-min",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "forwardPorts": [7862, 6080],
+  "postCreateCommand": "/bin/bash -lc '\
+    set -e; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify chromium-browser; \
+    python -m pip install --upgrade pip; \
+    pip install streamlit transformers; \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu; \
+    echo Done.'",
+  "postStartCommand": "/bin/bash -lc '\
+    export DISPLAY=:1; \
+    vncserver -kill :1 >/dev/null 2>&1 || true; \
+    vncserver :1 -localhost no -SecurityTypes None -geometry 390x844; \
+    ( websockify --web=/usr/share/novnc/ 6080 localhost:5901 >/tmp/novnc.log 2>&1 & ); \
+    ( sleep 3; DISPLAY=:1 chromium-browser --no-sandbox --window-size=390,844 --app=http://localhost:7862 >/tmp/chromium.log 2>&1 & ); \
+    echo \"noVNC em http://localhost:6080\";'",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-toolsai.jupyter"]
+    }
+  }
+}
