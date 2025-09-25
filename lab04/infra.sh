@@ -4,16 +4,35 @@ set -e
 API_PORT=8000
 MODEL="llama3.2:1b"
 
-echo "[*] Verificando se o modelo $MODEL está disponível..."
+# ===============================
+# 0. Instalar Ollama (Linux)
+# ===============================
+if ! command -v ollama &> /dev/null
+then
+    echo "[*] Instalando Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+else
+    echo "[*] Ollama já instalado."
+fi
+
+# ===============================
+# 1. Garantir modelo
+# ===============================
+echo "[*] Baixando/verificando modelo $MODEL..."
 ollama pull $MODEL
 
+# ===============================
+# 2. Subir Ollama
+# ===============================
 echo "[*] Iniciando Ollama em background..."
 ollama serve > ollama.log 2>&1 &
 OLLAMA_PID=$!
 echo $OLLAMA_PID > ollama.pid
-
 sleep 5
 
+# ===============================
+# 3. Subir API vulnerável
+# ===============================
 echo "[*] Subindo API vulnerável na porta $API_PORT..."
 python3 <<'EOF'
 import uvicorn
