@@ -1,0 +1,6 @@
+# 1) executar instalação e preparo do ambiente
+bash setup.sh
+
+# 2) iniciar a UI
+source mcp-multiia-env/bin/activate && streamlit run app.py
+# abrir no navegador: http://localhost:8501
