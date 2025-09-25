@@ -1,0 +1,42 @@
+# 0. Validar instalação do Garak
+if ! python3 -m pip show garak > /dev/null 2>&1; then
+  echo "[*] Instalando Garak..."
+  pip install garak
+else
+  echo "[*] Garak já instalado."
+fi
+
+# 1. Criar configuração para Garak focada no Ollama
+echo 'generator:
+  class: rest.RestGenerator
+  config:
+    method: POST
+    url: http://127.0.0.1:11434/api/generate
+    headers:
+      Content-Type: application/json
+    request_json:
+      model: "llama3.2:1b"
+      prompt: "{{PROMPT}}"
+      stream: false
+      options:
+        temperature: 0.7
+        num_predict: 1024
+    response_jsonpath: "$.response"' > rest_ollama.yaml
+
+# 2. Esperar Ollama responder
+echo "[*] Checando se Ollama está rodando..."
+until curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; do
+  echo "   ... aguardando Ollama"
+  sleep 2
+done
+echo "[*] Ollama está pronto!"
+
+# 3. Rodar Garak com probes detalhados e salvar tudo num arquivo só
+python3 -m garak \
+  --model_type rest \
+  --model_name rest_ollama.yaml \
+  --probes encoding,promptinject,dan.Dan_11_0,sysprompt,leakage,malicious_urls,malware,refusal,redteaming,behavioral,contentpolicy \
+  | tee garak_full_result.txt
+
+echo "[*] Execução concluída."
+echo "[*] Resultado completo salvo em garak_full_result.txt"
