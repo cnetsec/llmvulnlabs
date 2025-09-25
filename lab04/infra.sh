@@ -16,25 +16,32 @@ else
 fi
 
 # ===============================
-# 1. Garantir modelo
-# ===============================
-echo "[*] Baixando/verificando modelo $MODEL..."
-ollama pull $MODEL
-
-# ===============================
-# 2. Subir Ollama
+# 1. Subir Ollama
 # ===============================
 echo "[*] Iniciando Ollama em background..."
 ollama serve > ollama.log 2>&1 &
 OLLAMA_PID=$!
 echo $OLLAMA_PID > ollama.pid
-sleep 5
+
+# Esperar Ollama responder
+echo "[*] Aguardando Ollama iniciar..."
+until curl -s http://localhost:11434/api/tags > /dev/null 2>&1; do
+    echo "   ... esperando Ollama (pid=$OLLAMA_PID)"
+    sleep 2
+done
+echo "[*] Ollama está pronto!"
 
 # ===============================
-# 3. Subir API vulnerável
+# 2. Garantir modelo
 # ===============================
-echo "[*] Subindo API vulnerável na porta $API_PORT..."
-python3 <<'EOF'
+echo "[*] Baixando/verificando modelo $MODEL..."
+ollama pull $MODEL
+
+# ===============================
+# 3. Subir API vulnerável em background
+# ===============================
+echo "[*] Subindo API vulnerável em background..."
+python3 <<'EOF' > api.log 2>&1 &
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,3 +103,15 @@ with open("rest_victim.yaml", "w") as f:
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
 EOF
+API_PID=$!
+echo $API_PID > api.pid
+
+# Esperar API responder
+echo "[*] Aguardando API subir..."
+until curl -s http://127.0.0.1:$API_PORT/chat -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"prompt":"ping"}' > /dev/null 2>&1; do
+    echo "   ... esperando API (pid=$API_PID)"
+    sleep 2
+done
+echo "[*] API vulnerável está pronta em http://127.0.0.1:$API_PORT/chat"
