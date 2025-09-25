@@ -1,14 +1,26 @@
-import subprocess
-import threading
-import time
+#!/bin/bash
+set -e
+
+API_PORT=8000
+MODEL="llama3.2:1b"
+
+echo "[*] Verificando se o modelo $MODEL está disponível..."
+ollama pull $MODEL
+
+echo "[*] Iniciando Ollama em background..."
+ollama serve > ollama.log 2>&1 &
+OLLAMA_PID=$!
+echo $OLLAMA_PID > ollama.pid
+
+sleep 5
+
+echo "[*] Subindo API vulnerável na porta $API_PORT..."
+python3 <<'EOF'
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests, os, json, logging
 
-# =========================
-# 1. API Vulnerável
-# =========================
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 LOG_SECRETS = True
 ALLOW_OVERRIDES = True
@@ -47,9 +59,6 @@ async def chat(req: Request):
     data = r.json()
     return {"text": data.get("response", ""), "model": "ollama:llama3.2:1b"}
 
-# =========================
-# 2. Arquivo de config REST para Garak
-# =========================
 REST_CONFIG = """generator:
   class: rest.RestGenerator
   config:
@@ -65,35 +74,6 @@ REST_CONFIG = """generator:
 with open("rest_victim.yaml", "w") as f:
     f.write(REST_CONFIG)
 
-# =========================
-# 3. Função para rodar o garak em paralelo
-# =========================
-def run_garak():
-    time.sleep(3)  # espera a API subir
-    print("\n[*] Iniciando scan do Garak em tempo real...\n")
-    subprocess.run(
-        [
-            "python",
-            "-m",
-            "garak",
-            "--model_type",
-            "rest",
-            "--model_name",
-            "rest_victim.yaml",
-            "--probes",
-            "encoding,promptinject,dan.Dan_11_0",
-        ],
-        check=False,
-    )
-
-# =========================
-# 4. Rodar servidor + Garak
-# =========================
 if __name__ == "__main__":
-    t = threading.Thread(
-        target=lambda: uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
-    )
-    t.daemon = True
-    t.start()
-
-    run_garak()
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+EOF
