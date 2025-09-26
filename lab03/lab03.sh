@@ -1,206 +1,156 @@
 #!/usr/bin/env bash
-# phone_ollama_all.sh — Sobe Android (VNC) + cliente LLM web (Flask) + ADB reverse
-# Acesse o "telefone" em http://localhost:6080 e, dentro dele, abra http://127.0.0.1:7860 (cliente LLM)
-# Vars opcionais:
-#   OLLAMA_URL (padrão: http://127.0.0.1:11434)  | HOST_PORT (7860) | VNC_PORT (6080)
-#   ANDROID_TAG (budtmo/docker-android:emulator_11.0) | EMU_DEVICE ("Samsung Galaxy S10")
+set -euo pipefail
 
-set -Eeuo pipefail
-IFS=$'\n\t'
-trap 'rc=$?; echo -e "\n[ERRO] \"$BASH_COMMAND\" (linha $LINENO) → exit $rc"; exit $rc' ERR
+OUT_TXT="GARAK_LLMVULNLABS.txt"
+OUT_JSONL="GARAK_LLMVULNLABS.jsonl"
+LOG_DIR="${HOME}/.local/share/garak"
+GARAK_LOG="${LOG_DIR}/garak.log"
+REST_YAML="$(pwd)/rest_ollama.yaml"
+OLLAMA_URL="http://127.0.0.1:11434"
+MODEL_NAME="llama3.2:1b"
+PROBES="encoding,promptinject,dan.Dan_11_0,lmrc.Profanity,malwaregen.TopLevel,xss.MarkdownImageExfil,realtoxicityprompts.RTPInsult"
 
-# --------- Config ---------
-APP_FILE="ollama_client.py"
-VENV_DIR=".venv_phone_llm"
-ANDROID_NAME="android-phone"
-ANDROID_TAG="${ANDROID_TAG:-budtmo/docker-android:emulator_11.0}"
-EMU_DEVICE="${EMU_DEVICE:-Samsung Galaxy S10}"
-VNC_PORT="${VNC_PORT:-6080}"      # noVNC via HTTP
-ADB_PORT="${ADB_PORT:-5555}"
-HOST_PORT="${HOST_PORT:-7860}"    # Flask (cliente LLM)
-OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"  # aponte para onde seu Ollama server está
+echo "=== GARAK + OLLAMA runner ==="
+echo "Outputs: $(pwd)/${OUT_TXT}, $(pwd)/${OUT_JSONL}"
+echo
 
-# --------- Helpers ---------
-log(){ printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
-warn(){ printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-die(){ printf "\033[1;31m[ERROR]\033[0m %s\n" "$*"; exit 1; }
-
-need_cmd(){ command -v "$1" >/dev/null 2>&1 || die "Comando requerido não encontrado: $1"; }
-
-# --------- Checks básicos ---------
-need_cmd docker
-if ! docker info >/dev/null 2>&1; then
-  die "Docker não está rodando (daemon). Inicie o serviço e tente de novo."
+# 0) ensure jq exists (for nicer summaries)
+if ! command -v jq >/dev/null 2>&1; then
+  echo "[!] jq not found. Please install (apt: sudo apt install -y jq) for JSON summary. Continuing without jq..."
 fi
 
-# ADB (host): usaremos o do container budtmo? Preferimos host adb se existir
-if ! command -v adb >/dev/null 2>&1; then
-  warn "adb não encontrado no host. Vou tentar usar o 'adb' do container para conectar."
-fi
-
-# --------- Cliente LLM (Flask) no host ---------
-log "Preparando cliente LLM (Flask) no host, porta ${HOST_PORT}…"
-if [ ! -d "$VENV_DIR" ]; then python3 -m venv "$VENV_DIR"; fi
-# shellcheck disable=SC1090
-source "$VENV_DIR/bin/activate"
-python -m pip install --upgrade pip >/dev/null
-pip install --quiet "flask>=3.0" "requests>=2.31"
-
-cat > "$APP_FILE" <<PYEOF
-import os, json
-from flask import Flask, request, jsonify, make_response
-import requests
-
-app = Flask(__name__)
-OLLAMA_URL = os.environ.get("OLLAMA_URL","$OLLAMA_URL").rstrip("/")
-MODEL = os.environ.get("OLLAMA_MODEL","llama3.2:1b")
-TEMP  = float(os.environ.get("OLLAMA_TEMP","0.2"))
-MAX_TOK = int(os.environ.get("OLLAMA_MAXTOKENS","180"))
-HEADERS = {}
-try:
-    if os.environ.get("OLLAMA_HEADERS","").strip():
-        HEADERS = json.loads(os.environ["OLLAMA_HEADERS"])
-except Exception: pass
-
-HTML = f"""<!doctype html><meta charset='utf-8'>
-<title>LLM Client</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:16px;max-width:720px}}
-.msg{{padding:10px 12px;border-radius:12px;margin:6px 0}}
-.user{{background:#e8f0fe}} .assistant{{background:#f1f3f4}}
-.small{{color:#6b7280;font-size:12px}} textarea,input,button{{font-size:16px}}
-textarea{{width:100%;height:110px;padding:10px}} input,button{{padding:10px}}
-.row{{display:flex;gap:8px;flex-wrap:wrap}} input[type=text],input[type=number]{{flex:1}}
-</style>
-<h1>🤖 LLM Client</h1>
-<div class=small>Cliente simples para Ollama. Ajuste a URL se o servidor não estiver no host.</div>
-<details open><summary>Config</summary>
-<div class=row style="margin-top:8px">
-  <input id=url type=text value="{OLLAMA_URL}" placeholder="Ollama URL (ex.: http://IP:11434)">
-  <input id=model type=text value="{MODEL}" placeholder="Modelo">
-</div>
-<div class=row style="margin-top:8px">
-  <input id=temp type=number step=0.05 min=0 max=1.5 value="{TEMP}">
-  <input id=max  type=number min=16 max=4096 value="{MAX_TOK}">
-</div>
-<div class=row style="margin-top:8px">
-  <input id=hdrs type=text placeholder='Headers JSON opcional (ex: {"Authorization":"Bearer ..."})'>
-</div>
-<div class=small>Modo:
-  <label><input type=radio name=mode value=generate checked> /api/generate</label>
-  <label><input type=radio name=mode value=chat> /api/chat</label>
-</div>
-</details>
-<div id=chat></div>
-<textarea id=inp placeholder="Escreva seu pedido..."></textarea>
-<div class=row><button id=send>Enviar</button><button id=clr>Limpar</button></div>
-<script>
-const C = document.getElementById('chat'), I = document.getElementById('inp');
-const U = document.getElementById('url'), M = document.getElementById('model'), T = document.getElementById('temp'), X = document.getElementById('max'), H = document.getElementById('hdrs');
-const E = (n)=>document.querySelector('input[name="mode"]:checked').value;
-function add(role, text){ const d=document.createElement('div'); d.className='msg '+role; d.textContent=text; C.appendChild(d); d.scrollIntoView({behavior:'smooth',block:'end'}); }
-document.getElementById('clr').onclick=()=>{C.innerHTML=''; I.value='';};
-document.getElementById('send').onclick=async ()=>{
-  const text = I.value.trim(); if(!text) return; add('user',text); I.value='';
-  let hdrs={}; try{ if(H.value.trim()) hdrs=JSON.parse(H.value);}catch(_){}
-  const r = await fetch('/api/bridge',{method:'POST',headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({url:U.value, model:M.value, temp:parseFloat(T.value), max_tokens:parseInt(X.value), text, headers:hdrs, mode:E()})});
-  const j = await r.json(); add('assistant', j.ok ? (j.text||'(vazio)') : ('[ERRO] '+(j.error||'falha')));
-};
-</script>
-"""
-
-SYS = ("Você é conciso. Dado o pedido do usuário, indique a MELHOR OPÇÃO NO GITHUB "
-       "(Issues, Discussions, Projects, Actions, Wiki, Security/Dependabot, Codespaces, Pages, Releases) "
-       "e forneça 3–5 passos práticos. Responda em português. Estruture em:\\n- Opção recomendada:\\n- Por quê:\\n- Passos:\\n")
-
-@app.get("/")
-def index():
-    r = make_response(HTML); r.headers["Cache-Control"] = "no-store"; return r
-
-@app.post("/api/bridge")
-def bridge():
-    d = request.get_json(force=True,silent=True) or {}
-    url = (d.get("url") or OLLAMA_URL).rstrip("/")
-    model = d.get("model") or MODEL
-    temp = float(d.get("temp") or TEMP)
-    max_t = int(d.get("max_tokens") or MAX_TOK)
-    user = (d.get("text") or "").strip()
-    mode = (d.get("mode") or "generate").strip()
-    hdrs = dict(HEADERS); 
-    if isinstance(d.get("headers"), dict): hdrs.update(d["headers"])
-    try:
-        if mode=="chat":
-            body={"model":model,"messages":[{"role":"system","content":SYS},{"role":"user","content":user}],
-                  "stream":False,"options":{"temperature":temp,"num_predict":max_t}}
-            r = requests.post(url+"/api/chat", json=body, headers=hdrs, timeout=120)
-            if not r.ok: return jsonify({"ok":False,"error":f"Ollama HTTP {r.status_code}","details":r.text[:500]})
-            txt=(r.json().get("message",{}).get("content") or "").strip()
-            return jsonify({"ok":True,"text":txt})
-        else:
-            body={"model":model,"prompt":SYS+f"Pedido do usuário: {user}","stream":False,
-                  "options":{"temperature":temp,"num_predict":max_t}}
-            r = requests.post(url+"/api/generate", json=body, headers=hdrs, timeout=120)
-            if not r.ok: return jsonify({"ok":False,"error":f"Ollama HTTP {r.status_code}","details":r.text[:500]})
-            txt=(r.json().get("response") or "").strip()
-            return jsonify({"ok":True,"text":txt})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)}), 200
-
-if __name__=="__main__":
-    import os
-    app.run(host=os.environ.get("HOST","0.0.0.0"), port=int(os.environ.get("PORT","$HOST_PORT")), debug=False)
-PYEOF
-
-export HOST=0.0.0.0 PORT="$HOST_PORT" OLLAMA_URL
-
-# Levanta o cliente em background
-python "$APP_FILE" & FLASK_PID=$!
-trap 'kill $FLASK_PID >/dev/null 2>&1 || true' EXIT INT TERM
-sleep 1
-log "Cliente LLM ativo: http://localhost:${HOST_PORT}"
-
-# --------- Sobe Android (docker-android com noVNC) ---------
-if docker ps --format '{{.Names}}' | grep -q "^${ANDROID_NAME}$"; then
-  log "Container ${ANDROID_NAME} já existe. Reutilizando."
+# 1) Ensure garak installed
+if ! python3 -m pip show garak >/dev/null 2>&1; then
+  echo "[*] Installing garak (pip)..."
+  python3 -m pip install -U garak
 else
-  log "Baixando/rodando ${ANDROID_TAG} (Android + noVNC em ${VNC_PORT})…"
-  # --device /dev/kvm melhora desempenho em hosts com KVM
-  docker run -d --name "$ANDROID_NAME" \
-    --privileged \
-    --device /dev/kvm \
-    -e EMULATOR_DEVICE="$EMU_DEVICE" \
-    -e WEB_VNC=true \
-    -p "${VNC_PORT}:6080" \
-    -p "${ADB_PORT}:5555" \
-    "$ANDROID_TAG"
+  echo "[*] garak already installed."
 fi
 
-log "Acesse o 'telefone' via noVNC: http://localhost:${VNC_PORT}"
-
-# --------- Espera boot do emulador ---------
-log "Aguardando Android inicializar…"
-for i in {1..60}; do
-  if docker exec -it "$ANDROID_NAME" sh -c 'cat device_status 2>/dev/null' | grep -q "1"; then
-    log "Android pronto."
-    break
-  fi
-  sleep 3
-  if [ "$i" -eq 60 ]; then warn "Tempo de espera esgotado, seguindo mesmo assim."; fi
+# 2) Wait for Ollama to respond
+echo "[*] Checking Ollama at ${OLLAMA_URL} ..."
+TRIES=0
+until curl -sS "${OLLAMA_URL}/v1/models" >/dev/null 2>&1 || curl -sS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1 || [ $TRIES -ge 10 ]; do
+  echo "   ... aguardando Ollama (attempt=$((TRIES+1)))"
+  sleep 2
+  TRIES=$((TRIES+1))
 done
 
-# --------- Conecta ADB e cria reverse para o cliente ---------
-if command -v adb >/dev/null 2>&1; then
-  adb connect "localhost:${ADB_PORT}" || true
-  # mapeia porta do dispositivo -> host (assim, dentro do Android: http://127.0.0.1:7860)
-  adb -s "localhost:${ADB_PORT}" reverse "tcp:${HOST_PORT}" "tcp:${HOST_PORT}" || warn "Falha no adb reverse (abra http://<HOST_IP>:${HOST_PORT} do Android)."
-else
-  warn "adb não disponível no host. Se precisar do reverse, instale adb (platform-tools)."
+if [ $TRIES -ge 10 ]; then
+  echo "[!] Ollama não respondeu em ${OLLAMA_URL}. Continuarei mas pode falhar. Se estiver em container, expõe a porta."
 fi
 
-log "Tudo pronto ✅"
-log "1) Abra o telefone:   http://localhost:${VNC_PORT}"
-log "2) Dentro do Android, no navegador, abra:  http://127.0.0.1:${HOST_PORT}"
-log "   (ou http://<IP_DO_HOST>:${HOST_PORT} se o reverse não funcionar)"
-wait "$FLASK_PID"
+# 3) Create REST YAML fallback (always safe to have)
+cat > "${REST_YAML}" <<'YAML'
+generator:
+  class: rest.RestGenerator
+  config:
+    method: POST
+    url: http://127.0.0.1:11434/api/generate
+    headers:
+      Content-Type: application/json
+    request_json:
+      model: "llama3.2:1b"
+      prompt: "{{PROMPT}}"
+      stream: false
+      options:
+        temperature: 0.7
+        num_predict: 768
+    response_jsonpath: "$.response"
+YAML
+echo "[*] Created REST config at ${REST_YAML}"
+
+# 4) Prepare outputs (clean previous)
+rm -f "${OUT_TXT}" "${OUT_JSONL}"
+mkdir -p "$(pwd)"
+touch "${OUT_TXT}" "${OUT_JSONL}"
+
+# 5) Try using the dedicated 'ollama' generator first (preferred)
+echo
+echo "======================"
+echo "Attempt 1: using --model_type ollama"
+echo "======================"
+set +e
+python3 -m garak \
+  --model_type ollama \
+  --model_name "${MODEL_NAME}" \
+  --probes "${PROBES}" \
+  --generations 2 \
+  --skip_unknown --verbose \
+  --report "./${OUT_JSONL}" \
+  2>&1 | tee "./${OUT_TXT}"
+RC=$?
+set -e
+
+if [ $RC -eq 0 ]; then
+  echo "[*] garak finished (ollama generator)."
+else
+  echo "[!] garak failed with ollama generator (RC=${RC}). Will retry with REST generator."
+  echo >> "${OUT_TXT}"
+  echo "=== ollama-run-failed: fallback to REST generator ===" >> "${OUT_TXT}"
+
+  # 6) Run via REST generator (fallback)
+  python3 -m garak \
+    --model_type rest \
+    --model_name "${REST_YAML}" \
+    --probes "${PROBES}" \
+    --generations 2 \
+    --skip_unknown --verbose \
+    --report "./${OUT_JSONL}" \
+    2>&1 | tee -a "./${OUT_TXT}"
+fi
+
+# 7) Post-process: create a concise PASS/FAIL summary in the TXT (append)
+echo >> "${OUT_TXT}"
+echo "===== SUMMARY (generated at $(date -u +'%Y-%m-%dT%H:%M:%SZ')) =====" >> "${OUT_TXT}"
+
+# Try to extract PASS/FAIL lines from garak textual output (best-effort)
+if grep -E "PASS|FAIL" "./${OUT_TXT}" >/dev/null 2>&1; then
+  echo "[*] Extracting PASS/FAIL lines into the top of the report..."
+  {
+    echo "---- PASS/FAIL lines from run output ----"
+    grep -En "PASS|FAIL" "./${OUT_TXT}" | sed -n '1,200p'
+    echo
+  } >> "${OUT_TXT}"
+else
+  echo "No PASS/FAIL strings found in textual run output." >> "${OUT_TXT}"
+fi
+
+# 8) If JSONL report exists, produce structured summary (requires jq)
+if [ -s "./${OUT_JSONL}" ] && command -v jq >/dev/null 2>&1; then
+  echo "[*] Generating structured summary from JSONL (jq)."
+  {
+    echo "---- Structured summary from ${OUT_JSONL} ----"
+    echo "Total attempts: $(wc -l < "${OUT_JSONL}")"
+    echo
+    echo "Probe hit counts (probe_name / count):"
+    jq -r '(.probe_name // .probe // "unknown")' "${OUT_JSONL}" | sort | uniq -c | sort -rn
+    echo
+    echo "Failing evaluations (first 20):"
+    jq -c 'select((.evaluation.status // "") == "fail" or (.evaluation.result // "" | test("FAIL"; "i")) )' "${OUT_JSONL}" | sed -n '1,20p'
+    echo
+    echo "Top-level evaluation summary (status counts):"
+    jq -r '.evaluation.status // "none"' "${OUT_JSONL}" | sort | uniq -c | sort -rn
+  } >> "${OUT_TXT}"
+else
+  if [ -s "./${OUT_JSONL}" ]; then
+    echo "[!] jq not available - JSONL is present but cannot create structured summary. Install jq to get it." >> "${OUT_TXT}"
+  else
+    echo "[!] No JSONL report was produced (check garak output and ${GARAK_LOG})." >> "${OUT_TXT}"
+  fi
+fi
+
+# 9) Append tail of garak.log for diagnostics (if available)
+if [ -f "${GARAK_LOG}" ]; then
+  echo >> "${OUT_TXT}"
+  echo "---- Last 100 lines of ${GARAK_LOG} ----" >> "${OUT_TXT}"
+  tail -n 100 "${GARAK_LOG}" >> "${OUT_TXT}"
+else
+  echo "No garak.log found at ${GARAK_LOG}." >> "${OUT_TXT}"
+fi
+
+echo
+echo "DONE. Results:"
+echo " - Text report: $(pwd)/${OUT_TXT}"
+echo " - JSONL report: $(pwd)/${OUT_JSONL} (may be empty if run failed)"
+echo "Check ${GARAK_LOG} for internal logs."
