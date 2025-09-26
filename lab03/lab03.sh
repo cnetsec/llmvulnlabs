@@ -1,301 +1,206 @@
 #!/usr/bin/env bash
-# lab_android_all.sh  —  v2
-# Android (Termux) ou Linux rodando Streamlit que conecta num Ollama Server via API
-# + Uploader/instalador de APK (Package Installer / pm em Android; instruções adb em Linux)
+# phone_ollama_all.sh — Sobe Android (VNC) + cliente LLM web (Flask) + ADB reverse
+# Acesse o "telefone" em http://localhost:6080 e, dentro dele, abra http://127.0.0.1:7860 (cliente LLM)
+# Vars opcionais:
+#   OLLAMA_URL (padrão: http://127.0.0.1:11434)  | HOST_PORT (7860) | VNC_PORT (6080)
+#   ANDROID_TAG (budtmo/docker-android:emulator_11.0) | EMU_DEVICE ("Samsung Galaxy S10")
 
 set -Eeuo pipefail
 IFS=$'\n\t'
+trap 'rc=$?; echo -e "\n[ERRO] \"$BASH_COMMAND\" (linha $LINENO) → exit $rc"; exit $rc' ERR
 
-APP_FILE="lab_ollama_client.py"
-VENV_DIR=".venv_lab03"
-PORT="${PORT:-7860}"
-ADDRESS="${ADDRESS:-0.0.0.0}"
+# --------- Config ---------
+APP_FILE="ollama_client.py"
+VENV_DIR=".venv_phone_llm"
+ANDROID_NAME="android-phone"
+ANDROID_TAG="${ANDROID_TAG:-budtmo/docker-android:emulator_11.0}"
+EMU_DEVICE="${EMU_DEVICE:-Samsung Galaxy S10}"
+VNC_PORT="${VNC_PORT:-6080}"      # noVNC via HTTP
+ADB_PORT="${ADB_PORT:-5555}"
+HOST_PORT="${HOST_PORT:-7860}"    # Flask (cliente LLM)
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"  # aponte para onde seu Ollama server está
 
-log()  { printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
-warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-die()  { printf "\033[1;31m[ERROR]\033[0m %s\n" "$*"; exit 1; }
+# --------- Helpers ---------
+log(){ printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
+warn(){ printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+die(){ printf "\033[1;31m[ERROR]\033[0m %s\n" "$*"; exit 1; }
 
-is_termux=false
-is_codespaces=false
-if command -v termux-info >/dev/null 2>&1 || [[ -d "/data/data/com.termux/files/usr" ]]; then
-  is_termux=true
-fi
-if [[ -n "${CODESPACES:-}" || -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]]; then
-  is_codespaces=true
-fi
+need_cmd(){ command -v "$1" >/dev/null 2>&1 || die "Comando requerido não encontrado: $1"; }
 
-# ---------- 1) Sistema ----------
-if $is_termux; then
-  log "Detectado Android/Termux."
-  pkg update -y
-  pkg install -y python python-cryptography libffi openssl git
-  if ! command -v termux-open >/dev/null 2>&1; then
-    warn "Instalando 'termux-api' (requer app Termux:API no Android para abrir instalador de APK)."
-    pkg install -y termux-api || warn "Não foi possível instalar 'termux-api'."
-  fi
-else
-  log "Ambiente Linux."
-  if ! command -v python3 >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update -y
-      sudo apt-get install -y python3 python3-venv python3-pip
-    else
-      die "python3 não encontrado. Instale python3/venv/pip."
-    fi
-  fi
+# --------- Checks básicos ---------
+need_cmd docker
+if ! docker info >/dev/null 2>&1; then
+  die "Docker não está rodando (daemon). Inicie o serviço e tente de novo."
 fi
 
-# ---------- 2) Python/venv ----------
-if [ ! -d "$VENV_DIR" ]; then
-  log "Criando venv: $VENV_DIR"
-  python3 -m venv "$VENV_DIR"
+# ADB (host): usaremos o do container budtmo? Preferimos host adb se existir
+if ! command -v adb >/dev/null 2>&1; then
+  warn "adb não encontrado no host. Vou tentar usar o 'adb' do container para conectar."
 fi
+
+# --------- Cliente LLM (Flask) no host ---------
+log "Preparando cliente LLM (Flask) no host, porta ${HOST_PORT}…"
+if [ ! -d "$VENV_DIR" ]; then python3 -m venv "$VENV_DIR"; fi
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
-
-log "Atualizando pip e instalando libs (leves)…"
 python -m pip install --upgrade pip >/dev/null
-pip install --quiet "streamlit>=1.32" "requests>=2.31"
+pip install --quiet "flask>=3.0" "requests>=2.31"
 
-# ---------- 3) App Streamlit ----------
-log "Gerando $APP_FILE"
-cat > "$APP_FILE" << 'PYEOF'
-import os, time, shlex, subprocess, shutil, json, socket, requests, streamlit as st
+cat > "$APP_FILE" <<PYEOF
+import os, json
+from flask import Flask, request, jsonify, make_response
+import requests
 
-# ---------------- Config ----------------
-TMP_DIR_TERMUX = "/data/data/com.termux/files/usr/tmp"
-TMP_DIR = (TMP_DIR_TERMUX + "/lab03_apks") if os.path.isdir(TMP_DIR_TERMUX) else "/tmp/lab03_apks"
-os.makedirs(TMP_DIR, exist_ok=True)
+app = Flask(__name__)
+OLLAMA_URL = os.environ.get("OLLAMA_URL","$OLLAMA_URL").rstrip("/")
+MODEL = os.environ.get("OLLAMA_MODEL","llama3.2:1b")
+TEMP  = float(os.environ.get("OLLAMA_TEMP","0.2"))
+MAX_TOK = int(os.environ.get("OLLAMA_MAXTOKENS","180"))
+HEADERS = {}
+try:
+    if os.environ.get("OLLAMA_HEADERS","").strip():
+        HEADERS = json.loads(os.environ["OLLAMA_HEADERS"])
+except Exception: pass
 
-DEFAULT_URL     = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-DEFAULT_MODEL   = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
-DEFAULT_TEMP    = float(os.environ.get("OLLAMA_TEMP", "0.2"))
-DEFAULT_MAXTOK  = int(os.environ.get("OLLAMA_MAXTOK", "180"))
-DEFAULT_HEADERS = os.environ.get("OLLAMA_HEADERS", "")  # formato JSON opcional: {"Authorization":"Bearer ..."}
-DEFAULT_MODE    = os.environ.get("OLLAMA_MODE", "generate")  # generate|chat
+HTML = f"""<!doctype html><meta charset='utf-8'>
+<title>LLM Client</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:16px;max-width:720px}}
+.msg{{padding:10px 12px;border-radius:12px;margin:6px 0}}
+.user{{background:#e8f0fe}} .assistant{{background:#f1f3f4}}
+.small{{color:#6b7280;font-size:12px}} textarea,input,button{{font-size:16px}}
+textarea{{width:100%;height:110px;padding:10px}} input,button{{padding:10px}}
+.row{{display:flex;gap:8px;flex-wrap:wrap}} input[type=text],input[type=number]{{flex:1}}
+</style>
+<h1>🤖 LLM Client</h1>
+<div class=small>Cliente simples para Ollama. Ajuste a URL se o servidor não estiver no host.</div>
+<details open><summary>Config</summary>
+<div class=row style="margin-top:8px">
+  <input id=url type=text value="{OLLAMA_URL}" placeholder="Ollama URL (ex.: http://IP:11434)">
+  <input id=model type=text value="{MODEL}" placeholder="Modelo">
+</div>
+<div class=row style="margin-top:8px">
+  <input id=temp type=number step=0.05 min=0 max=1.5 value="{TEMP}">
+  <input id=max  type=number min=16 max=4096 value="{MAX_TOK}">
+</div>
+<div class=row style="margin-top:8px">
+  <input id=hdrs type=text placeholder='Headers JSON opcional (ex: {"Authorization":"Bearer ..."})'>
+</div>
+<div class=small>Modo:
+  <label><input type=radio name=mode value=generate checked> /api/generate</label>
+  <label><input type=radio name=mode value=chat> /api/chat</label>
+</div>
+</details>
+<div id=chat></div>
+<textarea id=inp placeholder="Escreva seu pedido..."></textarea>
+<div class=row><button id=send>Enviar</button><button id=clr>Limpar</button></div>
+<script>
+const C = document.getElementById('chat'), I = document.getElementById('inp');
+const U = document.getElementById('url'), M = document.getElementById('model'), T = document.getElementById('temp'), X = document.getElementById('max'), H = document.getElementById('hdrs');
+const E = (n)=>document.querySelector('input[name="mode"]:checked').value;
+function add(role, text){ const d=document.createElement('div'); d.className='msg '+role; d.textContent=text; C.appendChild(d); d.scrollIntoView({behavior:'smooth',block:'end'}); }
+document.getElementById('clr').onclick=()=>{C.innerHTML=''; I.value='';};
+document.getElementById('send').onclick=async ()=>{
+  const text = I.value.trim(); if(!text) return; add('user',text); I.value='';
+  let hdrs={}; try{ if(H.value.trim()) hdrs=JSON.parse(H.value);}catch(_){}
+  const r = await fetch('/api/bridge',{method:'POST',headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url:U.value, model:M.value, temp:parseFloat(T.value), max_tokens:parseInt(X.value), text, headers:hdrs, mode:E()})});
+  const j = await r.json(); add('assistant', j.ok ? (j.text||'(vazio)') : ('[ERRO] '+(j.error||'falha')));
+};
+</script>
+"""
 
-def is_termux() -> bool:
-    return os.path.isdir("/data/data/com.termux/files/usr") or "ANDROID_ROOT" in os.environ
+SYS = ("Você é conciso. Dado o pedido do usuário, indique a MELHOR OPÇÃO NO GITHUB "
+       "(Issues, Discussions, Projects, Actions, Wiki, Security/Dependabot, Codespaces, Pages, Releases) "
+       "e forneça 3–5 passos práticos. Responda em português. Estruture em:\\n- Opção recomendada:\\n- Por quê:\\n- Passos:\\n")
 
-st.set_page_config(page_title="Hacktiba — Ollama Client", page_icon="🤖", layout="centered")
-st.markdown("""<style>
-.block-container {padding-top: 1rem; max-width: 720px;}
-.user {background:#e8f0fe;border-radius:14px;padding:10px 12px;margin:6px 0;}
-.assistant {background:#f1f3f4;border-radius:14px;padding:10px 12px;margin:6px 0;}
-.small {font-size:12px;color:#6b7280;}
-.header {display:flex;gap:8px;align-items:center;}
-.header .title {font-weight:700;font-size:18px;}
-.kv {font-family: ui-monospace, monospace;}
-</style>""", unsafe_allow_html=True)
+@app.get("/")
+def index():
+    r = make_response(HTML); r.headers["Cache-Control"] = "no-store"; return r
 
-st.markdown('<div class="header">🤖 <div class="title">Hacktiba — Ollama Client</div></div>', unsafe_allow_html=True)
-st.caption("Cliente para Ollama Server via API + upload/instalação de APK (Android/Termux).")
-
-# ---------------- Sidebar ----------------
-with st.sidebar:
-    st.subheader("Ollama Server")
-    if "cfg" not in st.session_state:
-        st.session_state.cfg = {
-            "url": DEFAULT_URL,
-            "model": DEFAULT_MODEL,
-            "temp": DEFAULT_TEMP,
-            "max_tokens": DEFAULT_MAXTOK,
-            "headers": DEFAULT_HEADERS,
-            "mode": DEFAULT_MODE,   # generate | chat
-        }
-
-    st.session_state.cfg["url"]   = st.text_input("Ollama URL", st.session_state.cfg["url"], help="Ex.: http://127.0.0.1:11434")
-    st.session_state.cfg["model"] = st.text_input("Modelo", st.session_state.cfg["model"], help="Ex.: llama3.2:1b")
-    st.session_state.cfg["mode"]  = st.radio("Endpoint", ["generate","chat"], index=0 if st.session_state.cfg["mode"]=="generate" else 1,
-                                             help="`generate` usa prompt único; `chat` mantém histórico.")
-    st.session_state.cfg["temp"]  = st.slider("Temperatura", 0.0, 1.5, float(st.session_state.cfg["temp"]), 0.05)
-    st.session_state.cfg["max_tokens"] = st.slider("Máx. tokens", 16, 4096, int(st.session_state.cfg["max_tokens"]), 16)
-
-    st.markdown("Cabeçalhos HTTP (JSON opcional)")
-    st.session_state.cfg["headers"] = st.text_area("Ex.: {\"Authorization\":\"Bearer ...\"}", st.session_state.cfg["headers"], height=60)
-
-    # Status do Ollama
-    st.markdown("---")
-    st.subheader("Status")
-    headers = {}
+@app.post("/api/bridge")
+def bridge():
+    d = request.get_json(force=True,silent=True) or {}
+    url = (d.get("url") or OLLAMA_URL).rstrip("/")
+    model = d.get("model") or MODEL
+    temp = float(d.get("temp") or TEMP)
+    max_t = int(d.get("max_tokens") or MAX_TOK)
+    user = (d.get("text") or "").strip()
+    mode = (d.get("mode") or "generate").strip()
+    hdrs = dict(HEADERS); 
+    if isinstance(d.get("headers"), dict): hdrs.update(d["headers"])
     try:
-        if st.session_state.cfg["headers"].strip():
-            headers = json.loads(st.session_state.cfg["headers"])
-    except Exception as e:
-        st.warning(f"Cabeçalhos inválidos (JSON): {e}")
-
-    try:
-        r = requests.get(st.session_state.cfg["url"].rstrip("/") + "/api/tags", timeout=3, headers=headers)
-        if r.ok:
-            models = ", ".join(m.get("name","?") for m in r.json().get("models", [])[:6]) or "—"
-            st.success(f"Ollama OK • modelos: {models}")
+        if mode=="chat":
+            body={"model":model,"messages":[{"role":"system","content":SYS},{"role":"user","content":user}],
+                  "stream":False,"options":{"temperature":temp,"num_predict":max_t}}
+            r = requests.post(url+"/api/chat", json=body, headers=hdrs, timeout=120)
+            if not r.ok: return jsonify({"ok":False,"error":f"Ollama HTTP {r.status_code}","details":r.text[:500]})
+            txt=(r.json().get("message",{}).get("content") or "").strip()
+            return jsonify({"ok":True,"text":txt})
         else:
-            st.warning(f"Ollama HTTP {r.status_code}")
+            body={"model":model,"prompt":SYS+f"Pedido do usuário: {user}","stream":False,
+                  "options":{"temperature":temp,"num_predict":max_t}}
+            r = requests.post(url+"/api/generate", json=body, headers=hdrs, timeout=120)
+            if not r.ok: return jsonify({"ok":False,"error":f"Ollama HTTP {r.status_code}","details":r.text[:500]})
+            txt=(r.json().get("response") or "").strip()
+            return jsonify({"ok":True,"text":txt})
     except Exception as e:
-        st.warning(f"Ollama indisponível: {e}")
+        return jsonify({"ok":False,"error":str(e)}), 200
 
-    if st.button("Atualizar"):
-        st.experimental_rerun()
-
-# ---------------- Chat State ----------------
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role":"assistant","content":"Diga o que quer fazer no GitHub e eu recomendo a feature ideal (Issues, Discussions, Projects, Actions, Wiki, Security/Dependabot, Codespaces, Pages, Releases) com 3–5 passos práticos."}
-    ]
-
-for m in st.session_state.messages:
-    cls = "assistant" if m["role"]=="assistant" else "user"
-    st.markdown(f'<div class="{cls}">{m["content"]}</div>', unsafe_allow_html=True)
-
-SYSTEM_PROMPT = ("Você é conciso. Dado o pedido do usuário, indique a MELHOR OPÇÃO NO GITHUB "
-                 "(Issues, Discussions, Projects, Actions, Wiki, Security/Dependabot, Codespaces, Pages, Releases) "
-                 "e forneça 3–5 passos práticos. Responda em português. Estruture em:\n"
-                 "- Opção recomendada:\n- Por quê:\n- Passos:\n")
-
-def call_ollama_generate(user_text: str, cfg: dict, headers: dict) -> str:
-    body = {
-        "model": cfg["model"],
-        "prompt": SYSTEM_PROMPT + f"Pedido do usuário: {user_text}",
-        "stream": False,
-        "options": {"temperature": float(cfg["temp"]), "num_predict": int(cfg["max_tokens"])}
-    }
-    try:
-        resp = requests.post(cfg["url"].rstrip("/") + "/api/generate", json=body, timeout=120, headers=headers)
-        if not resp.ok:
-            return f"[Ollama HTTP {resp.status_code}] {resp.text[:300]}"
-        return (resp.json().get("response") or "").strip() or "Sem resposta do modelo."
-    except Exception as e:
-        return f"Erro (Ollama): {e}"
-
-def call_ollama_chat(user_text: str, cfg: dict, headers: dict) -> str:
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [{"role":"system","content":SYSTEM_PROMPT}]
-    st.session_state.chat_history.append({"role":"user","content":user_text})
-    body = {
-        "model": cfg["model"],
-        "messages": st.session_state.chat_history,
-        "stream": False,
-        "options": {"temperature": float(cfg["temp"]), "num_predict": int(cfg["max_tokens"])}
-    }
-    try:
-        resp = requests.post(cfg["url"].rstrip("/") + "/api/chat", json=body, timeout=120, headers=headers)
-        if not resp.ok:
-            return f"[Ollama HTTP {resp.status_code}] {resp.text[:300]}"
-        txt = (resp.json().get("message", {}).get("content") or "").strip() or "Sem resposta do modelo."
-        st.session_state.chat_history.append({"role":"assistant","content":txt})
-        return txt
-    except Exception as e:
-        return f"Erro (Ollama/chat): {e}"
-
-def ask_ollama(user_text: str) -> str:
-    cfg = st.session_state.cfg
-    headers = {}
-    try:
-        if cfg.get("headers","").strip():
-            headers = json.loads(cfg["headers"])
-    except Exception as e:
-        return f"Erro (headers JSON inválido): {e}"
-    if cfg.get("mode","generate") == "chat":
-        return call_ollama_chat(user_text, cfg, headers)
-    return call_ollama_generate(user_text, cfg, headers)
-
-with st.form("chat", clear_on_submit=True):
-    user_text = st.text_input("Digite aqui…", placeholder="Ex.: Quero reportar um bug no app móvel…")
-    sent = st.form_submit_button("Enviar")
-    if sent and user_text.strip():
-        st.session_state.messages.append({"role":"user","content":user_text.strip()})
-        reply = ask_ollama(user_text.strip())
-        st.session_state.messages.append({"role":"assistant","content":reply})
-        st.experimental_rerun()
-
-st.markdown(
-    f'<div class="small kv">URL: {st.session_state.cfg["url"]} • Modelo: {st.session_state.cfg["model"]} • '
-    f'Modo: {st.session_state.cfg["mode"]} • Temp: {st.session_state.cfg["temp"]} • Máx. tokens: {st.session_state.cfg["max_tokens"]}</div>',
-    unsafe_allow_html=True
-)
-st.markdown("---")
-
-# ---------------- APK upload & instalação ----------------
-st.header("Instalar APK neste dispositivo")
-
-st.write("- **Android/Termux**: preferível usar o **Package Installer** via `termux-open` (sem root).")
-st.write("- **pm install -r**: funciona em alguns ambientes (pode exigir permissões).")
-st.write("- **Linux**: use `adb install -r <apk>` a partir do seu PC.")
-
-uploaded = st.file_uploader("Selecione um .apk", type=["apk"])
-if uploaded:
-    ts = int(time.time())
-    safe_name = f"{ts}_{uploaded.name.replace(' ', '_')}"
-    dest_path = os.path.join(TMP_DIR, safe_name)
-    with open(dest_path, "wb") as f:
-        f.write(uploaded.getbuffer())
-    st.success(f"APK salvo: {dest_path}")
-
-    # Botão 1: Package Installer (termux-open)
-    if is_termux() and shutil.which("termux-open"):
-        if st.button("Instalar (Package Installer • termux-open)"):
-            try:
-                cmd = ["termux-open", "--content-type", "application/vnd.android.package-archive", dest_path]
-                st.info("Executando: " + " ".join(shlex.quote(c) for c in cmd))
-                subprocess.check_call(cmd)
-                st.success("Solicitação enviada ao instalador do sistema.")
-            except Exception as e:
-                st.error(f"Falha ao abrir instalador do sistema: {e}")
-    else:
-        st.info("termux-open indisponível. Tente 'Instalar via pm' abaixo.")
-
-    # Botão 2: pm install
-    if st.button("Instalar (pm install -r)"):
-        if is_termux():
-            cmd = ["pm", "install", "-r", dest_path]
-            st.info("Executando: " + " ".join(shlex.quote(c) for c in cmd))
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                if proc.returncode == 0:
-                    st.success("APK instalado via pm.")
-                    st.code(proc.stdout or "(sem stdout)")
-                else:
-                    st.error(f"Falhou (exit {proc.returncode}).")
-                    st.code((proc.stdout or "") + "\n" + (proc.stderr or ""))
-            except subprocess.TimeoutExpired:
-                st.error("Timeout: instalação demorou demais.")
-            except Exception as e:
-                st.error(f"Erro ao executar pm: {e}")
-        else:
-            st.info("Desktop/Linux: use `adb install -r <apk>` no seu PC.")
-
+if __name__=="__main__":
+    import os
+    app.run(host=os.environ.get("HOST","0.0.0.0"), port=int(os.environ.get("PORT","$HOST_PORT")), debug=False)
 PYEOF
 
-# ---------- 4) Porta livre & subir app ----------
-if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  warn "Porta $PORT já está em uso. Ajuste PORT=xxxx ou feche o processo antigo."
-fi
+export HOST=0.0.0.0 PORT="$HOST_PORT" OLLAMA_URL
 
-log "Subindo Streamlit em http://${ADDRESS}:${PORT}"
-streamlit run "$APP_FILE" --server.port "$PORT" --server.address "$ADDRESS" &
-APP_PID=$!
+# Levanta o cliente em background
+python "$APP_FILE" & FLASK_PID=$!
+trap 'kill $FLASK_PID >/dev/null 2>&1 || true' EXIT INT TERM
+sleep 1
+log "Cliente LLM ativo: http://localhost:${HOST_PORT}"
 
-cleanup() {
-  log "Encerrando app (PID $APP_PID)…"
-  kill "$APP_PID" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT INT TERM
-
-# ---------- 5) Dica de acesso ----------
-if $is_termux; then
-  if command -v termux-open-url >/dev/null 2>&1; then
-    sleep 2
-    termux-open-url "http://127.0.0.1:${PORT}" || true
-  fi
-  log "Abra no navegador do Android: http://127.0.0.1:${PORT}"
-elif $is_codespaces; then
-  if command -v gp >/dev/null 2>&1; then
-    PUBLIC_URL="$(gp url "$PORT" || true)"
-    [ -n "$PUBLIC_URL" ] && log "Codespaces URL: $PUBLIC_URL"
-  fi
-  log "No Codespaces, exponha a porta $PORT e abra a URL pública."
+# --------- Sobe Android (docker-android com noVNC) ---------
+if docker ps --format '{{.Names}}' | grep -q "^${ANDROID_NAME}$"; then
+  log "Container ${ANDROID_NAME} já existe. Reutilizando."
 else
-  log "Abra no navegador: http://localhost:${PORT}"
+  log "Baixando/rodando ${ANDROID_TAG} (Android + noVNC em ${VNC_PORT})…"
+  # --device /dev/kvm melhora desempenho em hosts com KVM
+  docker run -d --name "$ANDROID_NAME" \
+    --privileged \
+    --device /dev/kvm \
+    -e EMULATOR_DEVICE="$EMU_DEVICE" \
+    -e WEB_VNC=true \
+    -p "${VNC_PORT}:6080" \
+    -p "${ADB_PORT}:5555" \
+    "$ANDROID_TAG"
 fi
 
-wait "$APP_PID"
+log "Acesse o 'telefone' via noVNC: http://localhost:${VNC_PORT}"
+
+# --------- Espera boot do emulador ---------
+log "Aguardando Android inicializar…"
+for i in {1..60}; do
+  if docker exec -it "$ANDROID_NAME" sh -c 'cat device_status 2>/dev/null' | grep -q "1"; then
+    log "Android pronto."
+    break
+  fi
+  sleep 3
+  if [ "$i" -eq 60 ]; then warn "Tempo de espera esgotado, seguindo mesmo assim."; fi
+done
+
+# --------- Conecta ADB e cria reverse para o cliente ---------
+if command -v adb >/dev/null 2>&1; then
+  adb connect "localhost:${ADB_PORT}" || true
+  # mapeia porta do dispositivo -> host (assim, dentro do Android: http://127.0.0.1:7860)
+  adb -s "localhost:${ADB_PORT}" reverse "tcp:${HOST_PORT}" "tcp:${HOST_PORT}" || warn "Falha no adb reverse (abra http://<HOST_IP>:${HOST_PORT} do Android)."
+else
+  warn "adb não disponível no host. Se precisar do reverse, instale adb (platform-tools)."
+fi
+
+log "Tudo pronto ✅"
+log "1) Abra o telefone:   http://localhost:${VNC_PORT}"
+log "2) Dentro do Android, no navegador, abra:  http://127.0.0.1:${HOST_PORT}"
+log "   (ou http://<IP_DO_HOST>:${HOST_PORT} se o reverse não funcionar)"
+wait "$FLASK_PID"
